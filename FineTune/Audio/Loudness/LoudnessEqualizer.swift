@@ -39,9 +39,9 @@ final class LoudnessEqualizer: @unchecked Sendable {
     private let releaseSpeedNorm: Float
 
     /// Custom parametric EQ sidechain filters.
-    private let customFilter: ParametricSidechainFilter
-    private let customFilterBass: ParametricSidechainFilter
-    private let customFilterMaster: ParametricSidechainFilter
+    private var customFilter: ParametricSidechainFilter
+    private var customFilterBass: ParametricSidechainFilter
+    private var customFilterMaster: ParametricSidechainFilter
 
     /// Per-sample fallback coefficient (from silenceGateFallbackTimeS).
     private let fallbackAlpha: Float
@@ -68,6 +68,9 @@ final class LoudnessEqualizer: @unchecked Sendable {
 
     /// Sudden jump protection attack coefficient (fast, ~5 ms).
     private let sjpAttackCoeff: Float
+
+    /// Precomputed ln(gateSlowdownFactor) for RT-path: replaces pow(base,x) with exp(ln*x).
+    private let lnGateSlowdownFactor: Float
 
     private var crossoverL: LinkwitzRileyCrossover2
     private var crossoverR: LinkwitzRileyCrossover2
@@ -112,6 +115,7 @@ final class LoudnessEqualizer: @unchecked Sendable {
         self.sjpAttackCoeff = LoudnessEqualizerMath.timeConstantCoefficient(
             timeMs: 5.0, stepMs: samplePeriodMs
         )
+        self.lnGateSlowdownFactor = log(max(settings.gateSlowdownFactor, 1e-9))
 
         self.crossoverL = LinkwitzRileyCrossover2(frequency: 150.0, sampleRate: Double(sampleRate))
         self.crossoverR = LinkwitzRileyCrossover2(frequency: 150.0, sampleRate: Double(sampleRate))
@@ -174,7 +178,7 @@ final class LoudnessEqualizer: @unchecked Sendable {
         let jumpProtection = settings.suddenJumpProtectionEnabled
         let silenceGateThreshold = settings.silenceGateThresholdDb
         let silenceGateSlowdown = settings.silenceGateSlowdownDb
-        let gateSlowdownFactor = settings.gateSlowdownFactor
+
         let suddenDropProtection = settings.suddenDropProtection
         let suddenDropThreshold = settings.suddenDropThresholdDb
         let suddenDropSpeedup = settings.suddenDropSpeedup
@@ -242,7 +246,6 @@ final class LoudnessEqualizer: @unchecked Sendable {
                     jumpProtection: jumpProtection,
                     broadbandGatingFactor: gatingFactor,
                     silenceGateSlowdown: silenceGateSlowdown,
-                    gateSlowdownFactor: gateSlowdownFactor,
                     suddenDropProtection: suddenDropProtection,
                     suddenDropThresholdDb: suddenDropThreshold,
                     suddenDropSpeedup: suddenDropSpeedup,
@@ -264,7 +267,6 @@ final class LoudnessEqualizer: @unchecked Sendable {
                     jumpProtection: jumpProtection,
                     broadbandGatingFactor: gatingFactor,
                     silenceGateSlowdown: silenceGateSlowdown,
-                    gateSlowdownFactor: gateSlowdownFactor,
                     suddenDropProtection: suddenDropProtection,
                     suddenDropThresholdDb: suddenDropThreshold,
                     suddenDropSpeedup: suddenDropSpeedup,
@@ -336,7 +338,6 @@ final class LoudnessEqualizer: @unchecked Sendable {
                     jumpProtection: jumpProtection,
                     broadbandGatingFactor: gatingFactor,
                     silenceGateSlowdown: silenceGateSlowdown,
-                    gateSlowdownFactor: gateSlowdownFactor,
                     suddenDropProtection: suddenDropProtection,
                     suddenDropThresholdDb: suddenDropThreshold,
                     suddenDropSpeedup: suddenDropSpeedup,
@@ -358,7 +359,6 @@ final class LoudnessEqualizer: @unchecked Sendable {
                     jumpProtection: jumpProtection,
                     broadbandGatingFactor: gatingFactor,
                     silenceGateSlowdown: silenceGateSlowdown,
-                    gateSlowdownFactor: gateSlowdownFactor,
                     suddenDropProtection: suddenDropProtection,
                     suddenDropThresholdDb: suddenDropThreshold,
                     suddenDropSpeedup: suddenDropSpeedup,
@@ -425,7 +425,6 @@ final class LoudnessEqualizer: @unchecked Sendable {
                     jumpProtection: jumpProtection,
                     broadbandGatingFactor: gatingFactor,
                     silenceGateSlowdown: silenceGateSlowdown,
-                    gateSlowdownFactor: gateSlowdownFactor,
                     suddenDropProtection: suddenDropProtection,
                     suddenDropThresholdDb: suddenDropThreshold,
                     suddenDropSpeedup: suddenDropSpeedup,
@@ -463,7 +462,7 @@ final class LoudnessEqualizer: @unchecked Sendable {
         jumpProtection: Bool,
         broadbandGatingFactor: Float,
         silenceGateSlowdown: Float,
-        gateSlowdownFactor: Float,
+
         suddenDropProtection: Bool,
         suddenDropThresholdDb: Float,
         suddenDropSpeedup: Float,
@@ -513,7 +512,7 @@ final class LoudnessEqualizer: @unchecked Sendable {
             var speedMult: Float = 1.0
 
             if levelDb < silenceGateSlowdown {
-                speedMult *= pow(gateSlowdownFactor, 1.0 - gatingFactor)
+                speedMult *= exp(lnGateSlowdownFactor * (1.0 - gatingFactor))
             }
             if suddenDropProtection && deltaInput < -suddenDropThresholdDb {
                 speedMult *= suddenDropSpeedup
