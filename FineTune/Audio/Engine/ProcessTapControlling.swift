@@ -32,6 +32,15 @@ protocol ProcessTapControlling: AnyObject {
     var tapSourceDeviceUID: String? { get }
     func refreshTapSource(_ preferredDeviceUID: String?) async throws
 
+    // AU effect chains
+    func updateAUEffectChain(_ entries: [AUEffectChainEntry])
+    func getAUEffectChainEntries() -> [AUEffectChainEntry]
+    func setAUChainBypassed(_ bypassed: Bool)
+    var isAUChainBypassed: Bool { get }
+    func updateDeviceAUEffectChain(_ entries: [AUEffectChainEntry])
+    func getDeviceAUEffectChainEntries() -> [AUEffectChainEntry]
+    func setDeviceAUChainBypassed(_ bypassed: Bool)
+    var isDeviceAUChainBypassed: Bool { get }
 }
 
 extension ProcessTapControlling {
@@ -61,4 +70,12 @@ extension ProcessTapControlling {
         // Default no-op for mocks that don't override
     }
 
+    func updateAUEffectChain(_ entries: [AUEffectChainEntry]) {}
+    func getAUEffectChainEntries() -> [AUEffectChainEntry] { [] }
+    func setAUChainBypassed(_ bypassed: Bool) {}
+    var isAUChainBypassed: Bool { false }
+    func updateDeviceAUEffectChain(_ entries: [AUEffectChainEntry]) {}
+    func getDeviceAUEffectChainEntries() -> [AUEffectChainEntry] { [] }
+    func setDeviceAUChainBypassed(_ bypassed: Bool) {}
+    var isDeviceAUChainBypassed: Bool { false }
 }
