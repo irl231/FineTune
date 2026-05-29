@@ -8,6 +8,7 @@ struct PairedDeviceRow: View {
     let isConnecting: Bool
     let errorMessage: String?
     let onConnect: () -> Void
+    var isDisconnected: Bool = true
 
     var body: some View {
         HStack(spacing: DesignTokens.Spacing.sm) {
@@ -16,11 +17,32 @@ struct PairedDeviceRow: View {
             // connected device rows. Connect-in-progress dims the badge.
             DeviceBadge(icon: device.icon, isSelected: false)
                 .opacity(isConnecting ? 0.5 : 1.0)
+            // Spacer matching RadioButton width for alignment with DeviceRow
+            Color.clear
+                .frame(
+                    width: DesignTokens.Dimensions.minTouchTarget,
+                    height: DesignTokens.Dimensions.minTouchTarget
+                )
+
+            // Device icon
+            Group {
+                if let icon = device.icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                } else {
+                    Image(systemName: "headphones")
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: DesignTokens.Dimensions.iconSize, height: DesignTokens.Dimensions.iconSize)
+            .opacity(isConnecting ? 0.5 : (isDisconnected ? 0.6 : 1.0))
 
             // Device name
             Text(device.name)
                 .font(DesignTokens.Typography.rowName)
-                .foregroundStyle(isConnecting
+                .foregroundStyle((isConnecting || isDisconnected)
                     ? DesignTokens.Colors.textSecondary
                     : DesignTokens.Colors.textPrimary)
                 .lineLimit(1)
