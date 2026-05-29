@@ -108,6 +108,15 @@ struct AudioTab: View {
     private var devicesSection: some View {
         SettingsSection("Devices") {
             SettingsRow(
+                "Auto-Switch New Output",
+                description: "Automatically use newly connected output devices"
+            ) {
+                Toggle("", isOn: $settings.appSettings.autoSwitchToConnectedOutputDevice)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .labelsHidden()
+            }
+            SettingsRow(
                 "Lock Input Device",
                 description: "Prevent auto-switching when devices connect"
             ) {
