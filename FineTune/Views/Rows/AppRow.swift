@@ -217,7 +217,8 @@ struct AppRow: View {
                     onDevicesSelected: onDevicesSelected,
                     onDeviceModeChange: onDeviceModeChange,
                     onSelectFollowDefault: onSelectFollowDefault,
-                    onEQToggle: onEQToggle
+                    onEQToggle: onEQToggle,
+                    isRowFocused: isFocused
                 )
             }
             .frame(height: DesignTokens.Dimensions.rowContentHeight)
