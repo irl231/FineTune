@@ -56,9 +56,6 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
     private var knownDeviceUIDs: Set<String> = []
     private var knownInputDeviceUIDs: Set<String> = []
 
-    /// Called when a BT output device crosses the A2DP ↔ SCO/HFP sample-rate threshold (44.1 kHz).
-    var onBTDeviceSampleRateChanged: ((_ uid: String, _ newRate: Double) -> Void)?
-
     /// Listeners for kAudioDevicePropertyDataSource changes on built-in devices (headphone jack detection)
     @ObservationIgnored private var dataSourceListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
 

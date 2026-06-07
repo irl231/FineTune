@@ -2465,25 +2465,6 @@ final class AudioEngine {
         healthMonitorTask = nil
     }
 
-    /// Recreates taps after a BT device switches between A2DP and call mode. The ghost-clock
-    /// strategy is rate-dependent — a 48 kHz ghost on a 24 kHz SCO device causes crackling.
-    private func handleBTDeviceSampleRateChanged(uid: String, newRate: Double) async {
-        logger.info("[RATE] BT output \(uid, privacy: .public) → \(newRate, format: .fixed(precision: 0)) Hz — recreating affected taps")
-
-        let affectedPIDs = taps.compactMap { (pid, tap) -> pid_t? in
-            tap.currentDeviceUIDs.contains(uid) ? pid : nil
-        }
-
-        guard !affectedPIDs.isEmpty else {
-            logger.debug("[RATE] No active taps on device \(uid, privacy: .public)")
-            return
-        }
-
-        for pid in affectedPIDs {
-            logger.info("[RATE] Recreating tap for PID \(pid)")
-            await recreateTap(for: pid)
-        }
-    }
 
     /// Tears down and recreates a tap for a given PID, preserving routing and settings.
     /// Async: awaits full CoreAudio resource teardown before creating the replacement tap
