@@ -56,6 +56,9 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
     private var knownDeviceUIDs: Set<String> = []
     private var knownInputDeviceUIDs: Set<String> = []
 
+    /// Called when a BT output device crosses the A2DP ↔ SCO/HFP sample-rate threshold (44.1 kHz).
+    var onBTDeviceSampleRateChanged: ((_ uid: String, _ newRate: Double) -> Void)?
+
     /// Listeners for kAudioDevicePropertyDataSource changes on built-in devices (headphone jack detection)
     @ObservationIgnored private var dataSourceListeners: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
 
@@ -273,16 +276,15 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
     }
 
     private func removeAllDataSourceListeners() {
-        for deviceID in dataSourceListeners.keys {
+        for deviceID in Array(dataSourceListeners.keys) {
             removeDataSourceListener(for: deviceID)
         }
     }
 
     // MARK: - Bluetooth Sample-Rate Listeners (A2DP ↔ SCO/HFP)
 
-    /// Installs/removes kAudioDevicePropertyNominalSampleRate listeners on BT output devices so
-    /// A2DP ↔ SCO/HFP mode switches (which keep the same AudioObjectID, only changing the nominal
-    /// rate) trigger tap re-evaluation.
+    /// Installs/removes kAudioDevicePropertyNominalSampleRate listeners on BT output devices
+    /// so A2DP ↔ SCO/HFP mode switches trigger tap recreation.
     private func syncSampleRateListeners(btOutputDeviceIDs: Set<AudioDeviceID>) {
         let currentIDs = Set(sampleRateListeners.keys)
 
@@ -322,17 +324,27 @@ final class AudioDeviceMonitor: AudioDeviceProviding {
         }
     }
 
+    /// Returns true when the rate change warrants tap recreation. newRate == 0 (HAL
+    /// transient) always suppresses. oldRate == 0 (cold-connect) fires only when the
+    /// device settles at A2DP (≥ 44.1 kHz). Otherwise fires on A2DP ↔ SCO boundary crossings.
+    nonisolated static func isCallModeTransition(oldRate: Double, newRate: Double) -> Bool {
+        guard newRate > 0 else { return false }
+        if oldRate == 0 { return newRate >= 44_100 }
+        return (oldRate < 44_100) != (newRate < 44_100)
+    }
+
     private func checkSampleRateThreshold(forDeviceID deviceID: AudioDeviceID, uid: String) {
         let newRate = (try? deviceID.readNominalSampleRate()) ?? 0
-
         // Skip transient HAL failures BEFORE touching the baseline. Storing a transient 0 would make
         // the next real read (e.g. 24 kHz SCO) look like a cold start and miss the A2DP→call
         // transition — re-introducing the crackle this listener exists to prevent.
         guard newRate > 0 else { return }
-
+        
         let oldRate = lastKnownSampleRates[deviceID] ?? 0
         guard Self.isMeaningfulRateChange(oldRate: oldRate, newRate: newRate) else { return }
         lastKnownSampleRates[deviceID] = newRate
+
+        guard AudioDeviceMonitor.isCallModeTransition(oldRate: oldRate, newRate: newRate) else { return }
 
         logger.info("[RATE] BT device \(uid, privacy: .public) \(oldRate, format: .fixed(precision: 0)) → \(newRate, format: .fixed(precision: 0)) Hz (call mode: \(newRate < 44_100))")
         onBTDeviceSampleRateChanged?(uid, newRate)
