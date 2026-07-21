@@ -10,7 +10,7 @@ import os
 // 1. **Main thread / @MainActor**: All setup, teardown, and state management.
 //    - activate(), invalidate(), updateDevices(), performCrossfadeSwitch()
 //    - Property writes to nonisolated(unsafe) vars (_volume, _isMuted, etc.)
-//    - This class is NOT @MainActor itself because the HAL I/O callback is not on main.
+//    - The class is @MainActor; the HAL callback is explicitly nonisolated.
 //
 // 2. **HAL I/O thread (real-time)**: Audio processing callback.
 //    - processAudioCallback() — unified callback with runtime role via callbackID
@@ -463,6 +463,68 @@ final class ProcessTapController: ProcessTapControlling {
         ghostClockUID == nil && !isTapSourceVirtual && !isPrimaryBTOutput
     }
 
+    /// Resolved plan for FineTune's private wrapping aggregate: which hardware sub-devices
+    /// to include, whether to stack them, and which one is the clock/main device.
+    struct AggregatePlan: Equatable {
+        var subDeviceUIDs: [String]
+        var isStacked: Bool
+        var clockDeviceUID: String
+    }
+
+    /// Pure planning step for `buildAggregateDescription`.
+    ///
+    /// Three CoreAudio constraints drive this:
+    ///   1. An aggregate device cannot be nested as a sub-device of another aggregate (the
+    ///      wrapping aggregate would report 0 output channels). User-created aggregates are
+    ///      therefore *flattened* into their hardware sub-devices via `expand`.
+    ///   2. A *stacked* aggregate collapses a multichannel sub-device's output to a single
+    ///      stereo pair, which discards the device's preferred (e.g. 3/4) stereo channel
+    ///      assignment. A flattened single output is therefore kept *non-stacked*, exposing
+    ///      every channel so the IO callback can place audio on the preferred channels.
+    ///   3. The IO callback can only honour that placement when the wrapper exposes exactly
+    ///      ONE output stream: preferred-channel indices are device-global, and the callback
+    ///      locates the tap as the trailing input buffer(s). A flatten that yields several
+    ///      sub-devices (or one device with several output streams) produces a multi-stream
+    ///      wrapper where neither holds, so those stay stacked — which also makes
+    ///      Multi-Output Device targets mirror correctly instead of playing one sub-device.
+    ///
+    /// - Parameters:
+    ///   - outputUIDs: The user-selected output device UIDs (1 = single, >1 = mirroring).
+    ///   - expand: Returns an aggregate's hardware sub-device UIDs, or `nil` for non-aggregates.
+    ///   - outputStreamCount: Returns a device's output-stream count (0 if unknown).
+    static func planAggregate(
+        outputUIDs: [String],
+        expand: (String) -> [String]?,
+        outputStreamCount: (String) -> Int
+    ) -> AggregatePlan {
+        precondition(!outputUIDs.isEmpty, "Must have at least one output device")
+
+        var flatUIDs: [String] = []
+        var didFlatten = false
+        for uid in outputUIDs {
+            if let subDevices = expand(uid), !subDevices.isEmpty {
+                flatUIDs.append(contentsOf: subDevices)
+                didFlatten = true
+            } else {
+                flatUIDs.append(uid)
+            }
+        }
+
+        // De-duplicate while preserving order (a device could appear in more than one aggregate).
+        var seen = Set<String>()
+        flatUIDs = flatUIDs.filter { seen.insert($0).inserted }
+
+        let isMirroring = outputUIDs.count > 1
+        let isSingleFlatten = didFlatten && !isMirroring && flatUIDs.count == 1
+        let isStacked = !(isSingleFlatten && outputStreamCount(flatUIDs[0]) == 1)
+
+        return AggregatePlan(
+            subDeviceUIDs: flatUIDs,
+            isStacked: isStacked,
+            clockDeviceUID: flatUIDs[0]
+        )
+    }
+
     /// Builds aggregate device description for synchronized multi-device output.
     /// First device is clock source (no drift compensation), others sync to it via drift compensation.
     ///
@@ -476,9 +538,25 @@ final class ProcessTapController: ProcessTapControlling {
     ) -> [String: Any] {
         precondition(!outputUIDs.isEmpty, "Must have at least one output device")
 
+        let plan = Self.planAggregate(
+            outputUIDs: outputUIDs,
+            expand: { uid in
+                // If this output is a user aggregate, return its hardware sub-devices so they can
+                // be flattened into FineTune's aggregate (nested aggregates aren't supported).
+                audioDeviceID(for: uid)?.aggregateSubDeviceUIDs()
+            },
+            outputStreamCount: { uid in
+                audioDeviceID(for: uid)?.streamCount(scope: kAudioObjectPropertyScopeOutput) ?? 0
+            }
+        )
+
+        if plan.subDeviceUIDs != outputUIDs {
+            logger.info("Flattened output \(outputUIDs, privacy: .public) → sub-devices \(plan.subDeviceUIDs, privacy: .public) (stacked=\(plan.isStacked))")
+        }
+
         // Build sub-device list - first device is clock source
         var subDevices: [[String: Any]] = []
-        for (index, deviceUID) in outputUIDs.enumerated() {
+        for (index, deviceUID) in plan.subDeviceUIDs.enumerated() {
             subDevices.append([
                 kAudioSubDeviceUIDKey: deviceUID,
                 // First device (index 0) is clock source - no drift compensation needed
@@ -488,14 +566,14 @@ final class ProcessTapController: ProcessTapControlling {
         }
 
         // Ghost clock: kAudioAggregateDeviceMainSubDeviceKey must always be a sub-device.
-        let clockDeviceUID = ghostClockUID ?? outputUIDs[0]
+    let clockDeviceUID = ghostClockUID ?? plan.clockDeviceUID
 
         // Drift comp must be off when tap source and clock master share a domain: BT output
         // (both follow the BT clock — enabling fires on the 50ppm BT-vs-crystal offset every
         // ~0.7 s), ghost clock (both sides are BT-domain), and virtual sources (burst delivery
         // looks like drift). On for wired/USB where the crystal domains actually differ.
         // Defaults to off when the device is unresolvable — less wrong on an unknown BT device.
-        let isPrimaryBTOutput = audioDeviceID(for: outputUIDs[0])?.isBluetoothDevice() ?? true
+    let isPrimaryBTOutput = audioDeviceID(for: plan.clockDeviceUID)?.isBluetoothDevice() ?? true
         let tapDriftCompensation = ProcessTapController.aggregateDriftCompEnabled(
             ghostClockUID: ghostClockUID,
             isTapSourceVirtual: isTapSourceVirtual(),
@@ -507,10 +585,12 @@ final class ProcessTapController: ProcessTapControlling {
         return [
             kAudioAggregateDeviceNameKey: name,
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
-            kAudioAggregateDeviceMainSubDeviceKey: outputUIDs[0],
-            kAudioAggregateDeviceClockDeviceKey: clockDeviceUID,
+            kAudioAggregateDeviceMainSubDeviceKey: plan.clockDeviceUID,
+        kAudioAggregateDeviceClockDeviceKey: clockDeviceUID,
             kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceIsStackedKey: true,  // Required for multi-device mirroring — HAL feeds same audio to all sub-devices
+            // Stacked mirrors the same audio to every sub-device (needed for multi-device output);
+            // a single flattened aggregate stays non-stacked so all its channels stay addressable.
+            kAudioAggregateDeviceIsStackedKey: plan.isStacked,
             kAudioAggregateDeviceTapAutoStartKey: true,
             kAudioAggregateDeviceSubDeviceListKey: subDevices,
             kAudioAggregateDeviceTapListKey: [
@@ -637,6 +717,62 @@ final class ProcessTapController: ProcessTapControlling {
             return (0, 1)
         }
         return deviceID.preferredStereoChannelIndices()
+    }
+
+    /// Per-input-stream "is used" flags for `kAudioDevicePropertyIOProcStreamUsage`, or `nil`
+    /// when there is nothing to disable. Only the trailing `outputCount` input streams (the
+    /// process tap — the only input the audio callback reads) are marked used.
+    static func inputStreamUsageFlags(inputCount: Int, outputCount: Int) -> [UInt32]? {
+        // outputCount == 0 also covers a failed stream-count read; an all-unused map would
+        // disable the tap stream itself (the HAL delivers NULL buffers for unused streams).
+        guard inputCount > 0, outputCount > 0 else { return nil }
+        let usedInputStreams = min(outputCount, inputCount)
+        guard inputCount > usedInputStreams else { return nil }  // nothing extra to disable
+        return (0..<inputCount).map { $0 >= inputCount - usedInputStreams ? 1 : 0 }
+    }
+
+    /// Tells the HAL that this IO proc does not use the wrapped device's *hardware input*
+    /// streams, so they are never powered on — otherwise macOS treats a duplex output
+    /// (e.g. a USB audio interface) as microphone use and prompts for permission.
+    /// The audio callback only reads the trailing tap stream(s), so the map cannot change
+    /// the audio it produces. No-op for plain output devices and the stacked path;
+    /// failures are non-fatal — audio still works, the prompt may appear.
+    private func disableHardwareInputStreams(aggregateID: AudioObjectID, procID: AudioDeviceIOProcID?) {
+        guard let procID else { return }
+
+        let inputCount = aggregateID.streamCount(scope: kAudioObjectPropertyScopeInput)
+        let outputCount = aggregateID.streamCount(scope: kAudioObjectPropertyScopeOutput)
+        guard let flagsArray = Self.inputStreamUsageFlags(inputCount: inputCount, outputCount: outputCount) else { return }
+        let usedInputStreams = flagsArray.reduce(0) { $0 + Int($1) }
+
+        // AudioHardwareIOProcStreamUsage is a variable-length C struct:
+        //   { void* mIOProc; UInt32 mNumberStreams; UInt32 mStreamIsOn[mNumberStreams]; }
+        let headerSize = MemoryLayout<UnsafeMutableRawPointer>.size + MemoryLayout<UInt32>.size
+        let totalSize = headerSize + inputCount * MemoryLayout<UInt32>.size
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: totalSize,
+            alignment: MemoryLayout<UnsafeMutableRawPointer>.alignment
+        )
+        defer { raw.deallocate() }
+
+        raw.storeBytes(of: unsafeBitCast(procID, to: UnsafeMutableRawPointer.self), as: UnsafeMutableRawPointer.self)
+        raw.storeBytes(of: UInt32(inputCount), toByteOffset: MemoryLayout<UnsafeMutableRawPointer>.size, as: UInt32.self)
+        let flags = raw.advanced(by: headerSize)
+        for (i, isUsed) in flagsArray.enumerated() {
+            flags.advanced(by: i * MemoryLayout<UInt32>.size).storeBytes(of: isUsed, as: UInt32.self)
+        }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyIOProcStreamUsage,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let err = AudioObjectSetPropertyData(aggregateID, &address, 0, nil, UInt32(totalSize), raw)
+        if err == noErr {
+            logger.info("Disabled \(inputCount - usedInputStreams) hardware input stream(s); kept \(usedInputStreams) tap stream(s)")
+        } else {
+            logger.warning("Could not disable hardware input streams (\(err)); microphone permission may be requested")
+        }
     }
 
     private func outputStreamIndex(for deviceUID: String?) -> UInt? {
@@ -827,6 +963,8 @@ final class ProcessTapController: ProcessTapControlling {
             cleanupPartialActivation()
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(err), userInfo: [NSLocalizedDescriptionKey: "Failed to create IO proc: \(err)"])
         }
+
+        disableHardwareInputStreams(aggregateID: primaryResources.aggregateDeviceID, procID: primaryResources.deviceProcID)
 
         // Seed the ramp target before AudioDeviceStart so the first IOProc callback
         // ramps from userVolume→userVolume (no-op) instead of 1.0→userVolume.
@@ -1224,6 +1362,8 @@ final class ProcessTapController: ProcessTapControlling {
             throw CrossfadeError.tapCreationFailed(err)
         }
 
+        disableHardwareInputStreams(aggregateID: secondaryResources.aggregateDeviceID, procID: secondaryResources.deviceProcID)
+
         err = AudioDeviceStart(secondaryResources.aggregateDeviceID, secondaryResources.deviceProcID)
         guard err == noErr else {
             secondaryResources.destroy()
@@ -1418,6 +1558,8 @@ final class ProcessTapController: ProcessTapControlling {
             newResources.destroy()
             throw CrossfadeError.tapCreationFailed(err)
         }
+
+        disableHardwareInputStreams(aggregateID: newResources.aggregateDeviceID, procID: newResources.deviceProcID)
 
         err = AudioDeviceStart(newResources.aggregateDeviceID, newResources.deviceProcID)
         guard err == noErr else {

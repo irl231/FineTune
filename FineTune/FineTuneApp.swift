@@ -45,6 +45,7 @@ struct FineTuneApp: App {
     @State private var popupVisibility: PopupVisibilityService
     @State private var hudController: HUDWindowController
     @State private var mediaKeyMonitor: MediaKeyMonitor
+    @State private var feedbackPlayer: VolumeFeedbackPlayer
     @State private var iconCoordinator: MenuBarIconCoordinator
     @State private var menuBarPopupController: MenuBarPopupController
     @State private var shortcutsRegistry: ShortcutsRegistry
@@ -129,6 +130,7 @@ struct FineTuneApp: App {
         let statusService = MediaKeyStatus()
         let popupService = PopupVisibilityService()
         let hud = HUDWindowController(settingsManager: settings, mediaKeyStatus: statusService, popupVisibility: popupService)
+        let feedbackPlayer = VolumeFeedbackPlayer()
 
         // Wire the interactive Tahoe slider back to the device volume monitor.
         // Mirrors the mute semantics applied for media-key drags (auto-unmute
@@ -149,6 +151,9 @@ struct FineTuneApp: App {
             }
             let gain = VolumeMapping.systemGain(forSliderFraction: sliderFraction, tier: tier)
             volumeMonitor.setVolume(for: deviceID, to: gain)
+            feedbackPlayer.requestFeedback(
+                gain: VolumeFeedback.gain(tier: tier, sliderFraction: sliderFraction)
+            )
         }
 
         let monitor = MediaKeyMonitor(
@@ -160,13 +165,19 @@ struct FineTuneApp: App {
             popupVisibility: popupService,
             mediaKeyStatus: statusService
         )
+        monitor.feedbackPlayer = feedbackPlayer
         _accessibility = State(initialValue: accessibilityService)
         _mediaKeyStatus = State(initialValue: statusService)
         _popupVisibility = State(initialValue: popupService)
         _hudController = State(initialValue: hud)
         _mediaKeyMonitor = State(initialValue: monitor)
+        _feedbackPlayer = State(initialValue: feedbackPlayer)
 
-        let coordinator = MenuBarIconCoordinator(deviceVolumeMonitor: engine.deviceVolumeMonitor as! DeviceVolumeMonitor, settings: settings)
+        let coordinator = MenuBarIconCoordinator(
+            deviceVolumeMonitor: engine.deviceVolumeMonitor as! DeviceVolumeMonitor,
+            deviceProvider: engine.deviceMonitor,
+            settings: settings
+        )
         monitor.iconCoordinator = coordinator
         // Defer start() so NSApplication.shared is fully bootstrapped before we walk NSApp.windows.
         DispatchQueue.main.async { [coordinator] in coordinator.start() }
@@ -179,10 +190,18 @@ struct FineTuneApp: App {
         let launchState = MenuBarIconState.baseline(
             style: settings.appSettings.menuBarIconStyle,
             volume: launchVolumeMonitor.volumes[launchID] ?? 1.0,
-            muted: launchVolumeMonitor.muteStates[launchID] ?? false
+            muted: launchVolumeMonitor.muteStates[launchID] ?? false,
+            deviceSymbol: MenuBarDeviceIconResolver.resolveSymbol(
+                priorityOrder: settings.devicePriorityOrder,
+                outputDevices: engine.deviceMonitor.outputDevices,
+                defaultDeviceID: launchID,
+                overrideForUID: { settings.getDeviceIconOverride(for: $0) }
+            )
         )
+        // The fallback must go through the shared canvas too, or the status
+        // item launches at natural symbol width and jumps on the first apply().
         launchIconImage = launchState.image.nsImage()
-            ?? NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "FineTune")!
+            ?? MenuBarIconImage.systemSymbol("speaker.wave.2").nsImage()!
 
         // Start Accessibility polling immediately so `isTrustedCached` is live
         // before the user first opens Settings. The trust-flip callback wires

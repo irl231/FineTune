@@ -42,6 +42,7 @@ struct DeviceRow: View {
     let autoEQPreampEnabled: Bool
     let onAutoEQPreampToggle: (() -> Void)?
     let isFocused: Bool
+    let iconOverrideSymbol: String?
 
     // AU effect chain (per-device)
     let deviceAUEffectChain: [AUEffectChainEntry]
@@ -82,6 +83,14 @@ struct DeviceRow: View {
     /// Default slider position to restore when unmuting from 0 (50%)
     private let defaultUnmuteVolume: Double = 0.5
 
+    private var displayIcon: NSImage? {
+        DeviceIconResolver.displayIcon(
+            overrideSymbol: iconOverrideSymbol,
+            automatic: device.icon,
+            deviceName: device.name
+        )
+    }
+
     init(
         device: AudioDevice,
         isDefault: Bool,
@@ -120,7 +129,8 @@ struct DeviceRow: View {
         onOpenDeviceAUGenericUI: ((UUID) -> Void)? = nil,
         deviceAUFailedEntryIDs: Set<UUID> = [],
         getDeviceAUFactoryPresets: ((UUID) -> [(index: Int, name: String)])? = nil,
-        onSelectDeviceAUFactoryPreset: ((UUID, Int) -> Void)? = nil
+        onSelectDeviceAUFactoryPreset: ((UUID, Int) -> Void)? = nil,
+        iconOverrideSymbol: String? = nil
     ) {
         self.device = device
         self.isDefault = isDefault
@@ -160,6 +170,7 @@ struct DeviceRow: View {
         self.deviceAUFailedEntryIDs = deviceAUFailedEntryIDs
         self.getDeviceAUFactoryPresets = getDeviceAUFactoryPresets
         self.onSelectDeviceAUFactoryPreset = onSelectDeviceAUFactoryPreset
+        self.iconOverrideSymbol = iconOverrideSymbol
         self._sliderValue = State(initialValue: Self.volumeToSlider(volume, backend: volumeBackend))
     }
 
@@ -230,7 +241,7 @@ struct DeviceRow: View {
             // Selection is now signalled by accent-colored gradient on the
             // badge plus bold device name; the row-level gesture in `body`
             // handles tap-to-set-default.
-            DeviceBadge(icon: device.icon, isSelected: isDefault)
+            DeviceBadge(icon: displayIcon, isSelected: isDefault)
 
             // Device name + optional AutoEQ profile subtitle + AutoEQ picker
             HStack(spacing: DesignTokens.Spacing.xs) {
